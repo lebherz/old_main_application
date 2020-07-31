@@ -10,6 +10,7 @@ import struct
 import pi3d
 import threading
 import logging
+import re
 from pkg_resources import resource_filename
 
 from .. import config
@@ -67,6 +68,7 @@ BACKLIGHT = 19
 TOUCHINT = 26
 
 firsttouch = True
+touch_active = False
 
 def crc8(crc, n):
     """ CRC checksum algorithm """
@@ -99,22 +101,35 @@ def i2crecover():
 
 
 def touchloop():
-    global xc, yc, lastx, lasty, touch_pressed, touch_file, lasttouch
+    global xc, yc, lastx, lasty, touch_pressed, touch_file, lasttouch, touch_active
     while True:
         event = touch_file.read(16)
         (_timestamp, _id, code, type, value) = struct.unpack('llHHI', event)
         if code == 3 and type == 0:
-            xc = value - 400
+            xc = (value) - 400
+            if touch_startx:
+
+             lastx = xc
+             touch_startx = False
+
         if code == 3 and type == 1:
-            yc = -(value - 240)
+            yc = -((value) - 240)
+            if touch_starty:
+             
+             lasty = yc
+             touch_starty = False
+            
         if code == 1 and type == 330:
             if value == 1: # touch started
                 eg_object.lastmotion = time.time()  # wake screen up on touch
                 lasttouch = time.time()
+                touch_active = True
+                touch_starty = True
+                touch_startx = True
                 touch_pressed = True
-                lastx = xc
-                lasty = yc
             else:
+                
+                touch_active = False
                 lastx = 0
 
 
@@ -131,8 +146,12 @@ def alert(value=1):
 
 
 def touched():
-    return gpio.input(TOUCHINT)
+    global os_touchdriver, touch_active
 
+    if os_touchdriver == 0:
+     return gpio.input(TOUCHINT)
+    else:
+      return touch_active
 
 def check_touch_pressed():
     global touch_pressed
@@ -390,6 +409,20 @@ def control_led_color(channel, rgbvalue):
 
 
 def control_led(rgbvalues):
+    ### Test the special LED value!
+    ### User can maniplulate the payload over mqtt
+    ### correct: <redValue>, <greenValue>, <blueValue>
+    ### each value 0-255
+    # find a pattern like {23,21,212} or [23,21,213] or 255,234,123 
+    # each value max 0-255
+    # normaly {}, [] or () are not allowed
+    pattern = re.compile("^[\[\{]?([01]?[0-9]?[0-9]|2[0-4][0-9]|25[0-5]),([01]?[0-9]?[0-9]|2[0-4][0-9]|25[0-5]),([01]?[0-9]?[0-9]|2[0-4][0-9]|25[0-5])[\]\}]?$")
+    match = pattern.split(rgbvalues)
+    if len(match) == 5:
+        match.remove('') # remove the first empty string, added by pattern [\[\{]?
+        match.remove('') # remove the last empty string, added by pattern [\]\}]?
+        rgbvalues = ', '.join(match)
+        logging.info("RegExTest matched: " + str(pattern.split(rgbvalues)))
     if type(rgbvalues) not in (list, tuple):
         rgbvalues = rgbvalues.split(",")
     if len(rgbvalues) == 3:
@@ -784,13 +817,32 @@ class EgClass(object):
 """ End of definitions section
 """
 # checks if touchdriver is running
-os_touchdriver = int(os.popen('pgrep -f touchdriver.py -c').readline()) - 1
 
-if os_touchdriver == 1: #TODO can there be more than one running
-    try:
-        touch_file = open("/dev/input/event1", "rb")
-    except:
-        touch_file = open("/dev/input/event0", "rb")
+os_touchdriver = 0
+
+if (os.popen('ls /dev/input/ | grep event1').readline() == 'event1\n'):
+      os_touchdriver = 1
+      touch_file = open("/dev/input/event1", "rb")
+      print('Touchscreen on event1')
+
+
+elif (os.popen('ls /dev/input/ | grep event0').readline() == 'event0\n'):
+      os_touchdriver = 1
+      touch_file = open("/dev/input/event0", "rb")
+      print('Touchscreen on event0')
+
+
+#if os_touchdriver == 0:
+# os_touchdriver = int(os.popen('pgrep -f touchdriver.py -c').readline()) - 1
+
+
+
+#if os_touchdriver == 1: #TODO can there be more than one running
+#    try:
+#        touch_file = open("/dev/input/event1", "rb")
+#    except:
+#        touch_file = open("/dev/input/event0", "rb")
+
 
 startmotion = time.time()
 i2cerr, i2csucc = 1, 1
@@ -802,12 +854,13 @@ lasttouch = 0.0
 bus = i2c.I2C(2)
 # bus.set_timeout(3)
 
-try:
+if os_touchdriver == 0:
+ try:
     bus.read(1, TOUCHADDR)
     # interrupt configuration i2c
     bus.write([0x6e, 0b00001110], TOUCHADDR)
     bus.write([0x70, 0b00000000], TOUCHADDR)
-except:
+ except:
     logging.error('Error: no touchscreen found')
     TOUCHADDR = False
 
